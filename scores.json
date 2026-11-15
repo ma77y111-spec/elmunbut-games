@@ -1,17 +1,1 @@
-[
-  {
-    "id": "smwhpwhonnyew4z",
-    "ts": 1794740076167,
-    "game": "Five Crowns",
-    "source": "manual",
-    "players": [
-      {
-        "name": "PersistTest",
-        "score": 42
-      }
-    ],
-    "winners": [
-      "PersistTest"
-    ]
-  }
-]
+[]
