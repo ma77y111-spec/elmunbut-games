@@ -1,1 +1,25 @@
-[]
+[
+  {
+    "id": "smwi7b6s62bpfns",
+    "ts": 1794769315350,
+    "game": "Flip 7",
+    "source": "online",
+    "players": [
+      {
+        "name": "Matthew",
+        "score": 216
+      },
+      {
+        "name": "Cockatoo",
+        "score": 197
+      },
+      {
+        "name": "Sly Fox",
+        "score": 160
+      }
+    ],
+    "winners": [
+      "Matthew"
+    ]
+  }
+]
