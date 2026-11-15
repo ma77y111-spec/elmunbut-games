@@ -1700,6 +1700,129 @@
       saveLog();
     }
 
+    /* ================= shared ElMunBut score table (game server) =================
+       One synced table for the whole crew, held by the game server: the
+       server records finished online games itself, and in-person results
+       are posted from the score card. The leaderboards are tallied from
+       these shared entries only. This device's bot practice games stay in
+       the local log above and never enter the shared tally. The last
+       fetched shared entries are cached on this device, so the table
+       still shows when the server can't be reached. */
+    var SCORES_API = 'https://elmunbut-server.onrender.com';
+    var SHARED_CACHE_KEY = 'elmunbut-shared-scores-v1';
+    var sharedEntries = (function(){
+      try {
+        var raw = localStorage.getItem(SHARED_CACHE_KEY);
+        if (raw){ var p = JSON.parse(raw); if (Array.isArray(p)) return p; }
+      } catch (e) {}
+      return [];
+    })();
+    var sharedStatus = 'idle'; // idle | loading | ok | failed
+    var sharedFetchInFlight = false;
+    var sharedFetchWaiters = [];
+    function saveSharedCache(){
+      try { localStorage.setItem(SHARED_CACHE_KEY, JSON.stringify(sharedEntries)); } catch (e) {}
+    }
+    // Fetch the shared table, retrying while the free-tier server wakes.
+    function fetchSharedScores(done){
+      if (done) sharedFetchWaiters.push(done);
+      if (sharedFetchInFlight) return;
+      sharedFetchInFlight = true;
+      sharedStatus = 'loading';
+      var attempts = 0;
+      function finish(ok){
+        sharedFetchInFlight = false;
+        sharedStatus = ok ? 'ok' : 'failed';
+        var ws = sharedFetchWaiters; sharedFetchWaiters = [];
+        ws.forEach(function(cb){ try { cb(ok); } catch (e) {} });
+        if (document.body.getAttribute('data-view') === 'history') renderHistory();
+      }
+      function attempt(){
+        attempts++;
+        var ctrl = ('AbortController' in window) ? new AbortController() : null;
+        var timer = ctrl ? setTimeout(function(){ ctrl.abort(); }, 20000) : null;
+        fetch(SCORES_API + '/scores', ctrl ? { signal: ctrl.signal } : {})
+          .then(function(r){ if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+          .then(function(data){
+            if (timer) clearTimeout(timer);
+            if (data && Array.isArray(data.entries)){
+              sharedEntries = data.entries;
+              saveSharedCache();
+              finish(true);
+            } else retry();
+          })
+          .catch(function(){ if (timer) clearTimeout(timer); retry(); });
+      }
+      function retry(){
+        if (attempts < 6) setTimeout(attempt, 3500);
+        else finish(false);
+      }
+      attempt();
+    }
+    function postScoreJson(path, payload, done){
+      var attempts = 0;
+      function attempt(){
+        attempts++;
+        fetch(SCORES_API + path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(function(r){ return r.json(); }).then(function(data){
+          if (data && data.ok) done(true, data.entry || null);
+          else if (attempts < 3) setTimeout(attempt, 3500);
+          else done(false, null);
+        }).catch(function(){
+          if (attempts < 3) setTimeout(attempt, 3500);
+          else done(false, null);
+        });
+      }
+      attempt();
+    }
+    function postManualScore(game, players, winners, done){
+      postScoreJson('/scores/manual', { key: 'elmunbut', game: game, players: players, winners: winners }, done);
+    }
+    function deleteSharedScore(id, done){
+      postScoreJson('/scores/delete', { key: 'elmunbut', id: id }, done);
+    }
+    // Normalise a server entry into the shape the history view renders.
+    function sharedToGame(e){
+      var winDir = e.game === 'Flip 7' ? 'high' : 'low';
+      var mode = e.game === 'Five Crowns' ? 'fivecrowns' : e.game === 'Phase 10' ? 'phase10' : e.game === 'Flip 7' ? 'flip7' : 'custom';
+      var players = (e.players || []).map(function(p){ return canonicalName(p.name); });
+      var totals = (e.players || []).map(function(p){ return p.score; });
+      var winners = (e.winners || []).map(canonicalName);
+      var winnerIdx = -1;
+      players.forEach(function(n, i){ if (winnerIdx < 0 && winners.indexOf(n) >= 0) winnerIdx = i; });
+      if (winnerIdx < 0 && totals.length) winnerIdx = bestIdx(totals, winDir);
+      return {
+        id: 'srv-' + e.id, serverId: e.id, shared: true, source: e.source,
+        game: e.game, mode: mode, winDir: winDir,
+        players: players, totals: totals, winnerIdx: winnerIdx, winners: winners,
+        complete: true, finishedAt: e.ts || 0
+      };
+    }
+    function sharedGamesList(){ return sharedEntries.map(sharedToGame); }
+    // True when a local log entry is the same finished game as a shared
+    // online entry (same game, same players and totals, close in time) —
+    // used so an online game logged on this device before the shared
+    // table existed isn't listed twice.
+    function sameResultAsShared(local, shared){
+      if (!local || !shared || local.game !== shared.game) return false;
+      if (Math.abs((local.finishedAt || 0) - (shared.finishedAt || 0)) > 15 * 60 * 1000) return false;
+      if (!Array.isArray(local.players) || !Array.isArray(local.totals)) return false;
+      if (local.players.length !== shared.players.length) return false;
+      var used = {};
+      for (var i = 0; i < local.players.length; i++){
+        var key = canonicalName(local.players[i]) + '|' + local.totals[i];
+        var found = false;
+        for (var j = 0; j < shared.players.length; j++){
+          if (!used[j] && shared.players[j] + '|' + shared.totals[j] === key){ used[j] = 1; found = true; break; }
+        }
+        if (!found) return false;
+      }
+      return true;
+    }
+
     /* ================= view switching ================= */
     function showView(name){
       document.body.setAttribute('data-view', name);
@@ -1707,6 +1830,7 @@
         $('view-' + v).style.display = (v === name) ? '' : 'none';
         $('tab-' + v).classList.toggle('active', v === name);
       });
+      if (name === 'score' || name === 'history') fetchSharedScores();
       if (name === 'score') renderScoreView();
       if (name === 'history') renderHistory();
       if (name === 'phase' && window.P10Start) window.P10Start();
@@ -1740,7 +1864,7 @@
       root.innerHTML =
         '<div class="panel">'
         + '<h2 class="vtitle">ElMunBut score card</h2>'
-        + '<p class="vsub">For games played in person — round by round, with running totals and the leader highlighted as you go. The card saves on this device as you type, so it survives the page being closed mid-game.</p>'
+        + '<p class="vsub">For games played in person — round by round, with running totals and the leader highlighted as you go. The card saves on this device as you type, so it survives the page being closed mid-game. When you finish, the result is posted to the shared ElMunBut score table, so the whole crew sees the same tally.</p>'
         + '<label class="fld"><span>Game</span><select id="sc-mode">'
         + '<option value="fivecrowns">Five Crowns — 11 rounds (3, 4, 5 … K), lowest total wins</option>'
         + '<option value="phase10">Phase 10 — 10 phases (P1 … P10), lowest total wins</option>'
@@ -1859,7 +1983,7 @@
       var cols = '46px repeat(' + d.players.length + ', minmax(0,1fr))';
       var html = '<div class="panel' + (d.mode === 'fivecrowns' ? ' theme-fc-panel' : d.mode === 'phase10' ? ' theme-p10-panel' : d.mode === 'flip7' ? ' theme-f7-panel' : '') + '">'
         + '<h2 class="vtitle">' + escapeHtml(d.game) + ' — ElMunBut</h2>'
-        + '<p class="vsub">' + (d.winDir === 'high' ? 'Highest total wins.' : 'Lowest total wins.') + (d.mode === 'flip7' ? ' First to 200 wins — enter 0 for a bust round, and the banked round score (numbers + modifiers, ×2 doubling numbers only, +15 for a Flip 7) otherwise. Finish the card when someone passes 200.' : '') + ' Scores save automatically on this device as you enter them.</p>'
+        + '<p class="vsub">' + (d.winDir === 'high' ? 'Highest total wins.' : 'Lowest total wins.') + (d.mode === 'flip7' ? ' First to 200 wins — enter 0 for a bust round, and the banked round score (numbers + modifiers, ×2 doubling numbers only, +15 for a Flip 7) otherwise. Finish the card when someone passes 200.' : '') + ' Scores save automatically on this device as you enter them' + (d.mode === 'custom' ? '.' : '; finishing posts the result to the shared ElMunBut table for the whole crew.') + '</p>'
         + (d.mode === 'flip7'
             ? '<div class="sc-frozenhead" style="grid-template-columns:' + cols + '" aria-label="Flip 7 player names and totals">'
             : '<div class="sc-grid" style="grid-template-columns:' + cols + '">')
@@ -1876,8 +2000,9 @@
         });
       });
       html += '</div>'
+        + '<div class="sc-savestatus" id="sc-savestatus" role="status"></div>'
         + '<div class="sc-actions">'
-        + '<button class="btn primary big" id="sc-finish" type="button">Finish game &amp; save to log</button>'
+        + '<button class="btn primary big" id="sc-finish" type="button">Finish game &amp; save result</button>'
         + '<button class="btn" id="sc-discard" type="button">Discard card</button>'
         + '</div></div>';
       root.innerHTML = html;
@@ -1907,16 +2032,44 @@
         var t = draftTotals(d);
         var wi = bestIdx(t, d.winDir);
         var roundsByPlayer = d.players.map(function(_, pi){ return d.scores.map(function(row){ return typeof row[pi] === 'number' ? row[pi] : 0; }); });
-        var game = {
-          id: d.id, source: 'paper', game: d.game, mode: d.mode, winDir: d.winDir,
-          players: d.players.slice(), roundsByPlayer: roundsByPlayer,
-          totals: t, winnerIdx: wi, complete: true, finishedAt: Date.now()
-        };
-        LOG.games.push(game);
-        LOG.draft = null;
-        saveLog();
-        justFinished = game;
-        renderScoreView();
+        if (d.mode === 'custom'){
+          // Custom games aren't part of the shared ElMunBut table — they
+          // keep saving to this device's log, exactly as before.
+          var localGame = {
+            id: d.id, source: 'paper', game: d.game, mode: d.mode, winDir: d.winDir,
+            players: d.players.slice(), roundsByPlayer: roundsByPlayer,
+            totals: t, winnerIdx: wi, complete: true, finishedAt: Date.now()
+          };
+          LOG.games.push(localGame);
+          LOG.draft = null;
+          saveLog();
+          justFinished = localGame;
+          renderScoreView();
+          return;
+        }
+        // Five Crowns, Phase 10 and Flip 7 results post to the shared
+        // table on the server, so they land in everyone's tally at once.
+        // The draft stays saved on this device until the post succeeds.
+        var winners = d.players.filter(function(_, i){ return t[i] === t[wi]; });
+        var btn = this, status = $('sc-savestatus');
+        btn.disabled = true;
+        if (status) status.textContent = 'Posting to the shared score table — if the server is asleep this can take a little while…';
+        postManualScore(d.game, d.players.map(function(n, i){ return { name: n, score: t[i] }; }), winners, function(ok){
+          if (!ok){
+            btn.disabled = false;
+            if (status) status.textContent = 'Could not reach the score server, so this result is not on the shared table yet. Your card is still saved on this device — tap Finish again to retry.';
+            return;
+          }
+          LOG.draft = null;
+          saveLog();
+          justFinished = {
+            id: d.id, shared: true, source: 'manual', game: d.game, mode: d.mode, winDir: d.winDir,
+            players: d.players.slice(), roundsByPlayer: roundsByPlayer,
+            totals: t, winnerIdx: wi, winners: winners, complete: true, finishedAt: Date.now()
+          };
+          fetchSharedScores();
+          renderScoreView();
+        });
       });
     }
     function renderFinished(root, game){
@@ -1927,7 +2080,7 @@
       root.innerHTML = '<div class="panel center' + (game.mode === 'fivecrowns' ? ' theme-fc-panel' : game.mode === 'phase10' ? ' theme-p10-panel' : game.mode === 'flip7' ? ' theme-f7-panel' : '') + '">'
         + '<div class="bigcrown">' + (game.mode === 'flip7' ? '7' : '♛') + '</div>'
         + '<h2 class="vtitle">' + escapeHtml(game.players[game.winnerIdx]) + (tied ? ' — tied first!' : ' wins!') + '</h2>'
-        + '<p class="vsub">' + escapeHtml(game.game) + ' · ' + (game.winDir === 'high' ? 'highest' : 'lowest') + ' total ' + game.totals[game.winnerIdx] + '. Saved to the ElMunBut log.</p>'
+        + '<p class="vsub">' + escapeHtml(game.game) + ' · ' + (game.winDir === 'high' ? 'highest' : 'lowest') + ' total ' + game.totals[game.winnerIdx] + '. ' + (game.shared ? 'Saved to the shared ElMunBut score table — the whole crew sees the same tally.' : 'Saved to the ElMunBut log on this device.') + '</p>'
         + '<div class="finlist">' + rows + '</div>'
         + '<div class="sc-actions center">'
         + '<button class="btn primary big" id="fin-new" type="button">New score card</button>'
@@ -1942,13 +2095,36 @@
     function fmtDate(ts){
       return new Date(ts).toLocaleDateString('en-AU', { day:'numeric', month:'short', year:'numeric' });
     }
+    var sharedDeleteArmedId = null;
+    var histNote = '';
     function renderHistory(){
       var root = $('history-root');
-      var games = LOG.games.slice().sort(function(a,b){ return b.finishedAt - a.finishedAt; });
+      var shared = sharedGamesList();
+      var sharedOnline = shared.filter(function(g){ return g.source === 'online'; });
+      // A local entry that duplicates a game the server already holds (an
+      // online game logged on this device before the shared table
+      // existed) is shown once — as the shared entry.
+      var localGames = LOG.games.filter(function(g){
+        if (g.source !== 'app') return true;
+        return !sharedOnline.some(function(sg){ return sameResultAsShared(g, sg); });
+      });
+      var games = shared.concat(localGames).sort(function(a,b){ return b.finishedAt - a.finishedAt; });
       var html = '';
+      if (sharedStatus === 'loading'){
+        html += '<p class="syncnote" role="status">Waking the score server… fetching the shared ElMunBut table.</p>';
+      } else if (sharedStatus === 'failed'){
+        html += '<p class="syncnote" role="status">' + (sharedEntries.length
+          ? 'Could not reach the score server — showing the last shared table saved on this device.'
+          : 'Could not reach the score server, so the shared table is not available right now.') + '</p>';
+      }
+      if (histNote) html += '<p class="syncnote" role="status">' + escapeHtml(histNote) + '</p>';
       // Leaderboards are kept separate per game — Five Crowns results never
       // mix with Phase 10 or Flip 7 (their scoring runs opposite ways, and
-      // each game deserves its own table). Custom games get a board each,
+      // each game deserves its own table). The three boards are tallied
+      // from the SHARED table only: online games the server recorded,
+      // plus in-person results posted from any phone. Practice games
+      // against the bots on this device are listed below but never
+      // counted. Custom games keep a board each, from this device's log,
       // grouped by the name they were logged under.
       var LB_DEFS = [
         { key:'fivecrowns', title:'Five Crowns', winDir:'low',  panelCls:' theme-fc-panel' },
@@ -1964,25 +2140,30 @@
         return { key:'custom:' + (g.game || 'Card game'), title:(g.game || 'Card game'), winDir:(g.winDir || 'low'), panelCls:'' };
       }
       var buckets = {}, bucketOrder = [];
-      games.forEach(function(g){
+      function tally(g){
         if (!g.complete) return;
         var def = lbBucketFor(g);
         if (!buckets[def.key]){ buckets[def.key] = { def:def, agg:{}, count:0 }; bucketOrder.push(def.key); }
         var bucket = buckets[def.key];
         bucket.count++;
+        var winners = (g.winners && g.winners.length) ? g.winners : [canonicalName(g.players[g.winnerIdx])];
         g.players.forEach(function(rawName, i){
           var n = canonicalName(rawName);
           if (!bucket.agg[n]) bucket.agg[n] = { games:0, wins:0, sum:0 };
           bucket.agg[n].games++;
           bucket.agg[n].sum += g.totals[i];
-          if (i === g.winnerIdx) bucket.agg[n].wins++;
+          if (winners.indexOf(n) >= 0) bucket.agg[n].wins++;
         });
+      }
+      shared.forEach(tally);
+      localGames.forEach(function(g){
+        if (lbBucketFor(g).key.indexOf('custom:') === 0) tally(g);
       });
       var orderedKeys = LB_DEFS.map(function(d){ return d.key; }).filter(function(k){ return buckets[k]; })
         .concat(bucketOrder.filter(function(k){ return LB_DEFS.every(function(d){ return d.key !== k; }); }));
       if (!orderedKeys.length){
         html += '<div class="panel"><h2 class="vtitle">ElMunBut leaderboards</h2>'
-          + '<p class="vsub">No finished games yet. Each game — Five Crowns, Phase 10 and Flip 7 — gets its own leaderboard here once you finish a game of it, against the bots or on a score card.</p></div>';
+          + '<p class="vsub">No finished games on the shared table yet. Online games are recorded by the server as they finish, and in-person games join the table when a score card is finished — then everyone in the crew sees the same tally here.</p></div>';
       } else {
         orderedKeys.forEach(function(key){
           var bucket = buckets[key], agg = bucket.agg, winDir = bucket.def.winDir;
@@ -1991,7 +2172,7 @@
             return agg[b].wins - agg[a].wins || (winDir === 'high' ? -avgDiff : avgDiff) || agg[b].games - agg[a].games;
           });
           html += '<div class="panel' + bucket.def.panelCls + '"><h2 class="vtitle">' + escapeHtml(bucket.def.title) + ' leaderboard</h2>'
-            + '<p class="vsub">' + bucket.count + ' finished ' + (bucket.count === 1 ? 'game' : 'games') + ' · ' + (winDir === 'high' ? 'highest total wins' : 'lowest total wins') + ' · ElMunBut games of ' + escapeHtml(bucket.def.title) + ' only.</p>'
+            + '<p class="vsub">' + bucket.count + ' finished ' + (bucket.count === 1 ? 'game' : 'games') + ' · ' + (winDir === 'high' ? 'highest total wins' : 'lowest total wins') + ' · ElMunBut games of ' + escapeHtml(bucket.def.title) + ' only' + (key.indexOf('custom:') === 0 ? ' · logged on this device.' : ' · from the shared table, synced for the whole crew.') + '</p>'
             + '<table class="standings"><tr><th>Player</th><th class="num">Games</th><th class="num">Wins</th><th class="num">Avg total</th></tr>';
           names.forEach(function(n){
             var a = agg[n];
@@ -2000,18 +2181,33 @@
           html += '</table></div>';
         });
       }
-      // game list
-      html += '<div class="panel"><h2 class="vtitle">Game history</h2>';
+      // game list: shared entries and this device's local games together,
+      // newest first. Shared manual entries can be removed (they post to
+      // the server); shared online entries can't; local entries delete
+      // from this device only.
+      html += '<div class="panel"><h2 class="vtitle">Game history</h2>'
+        + '<p class="vsub">Online and in-person games come from the shared ElMunBut table and count in the leaderboards above. Practice games against the bots on this device are listed too, marked “This device”, but they only count on this phone.</p>';
       if (!games.length) html += '<p class="vsub">Nothing logged yet.</p>';
       games.forEach(function(g){
+        var badge, action = '';
+        if (g.shared && g.source === 'online') badge = '<span class="badge app">Online</span>';
+        else if (g.shared) badge = '<span class="badge paper">In person</span>';
+        else badge = '<span class="badge local">This device</span>';
+        if (g.shared && g.source === 'manual')
+          action = '<button class="btn small danger" data-sdel="' + escapeHtml(String(g.serverId)) + '" type="button">' + (sharedDeleteArmedId === g.serverId ? 'Tap again to remove' : 'Remove') + '</button>';
+        else if (!g.shared)
+          action = '<button class="btn small danger" data-del="' + g.id + '" type="button">' + (deleteArmedId === g.id ? 'Tap again to delete' : 'Delete') + '</button>';
+        var winnerNames = (g.winners && g.winners.length) ? g.winners : [canonicalName(g.players[g.winnerIdx])];
         html += '<div class="histrow">'
-          + '<div class="histhead"><span class="badge ' + (g.source === 'app' ? 'app' : 'paper') + '">' + (g.source === 'app' ? 'In-app' : 'In person') + '</span>'
+          + '<div class="histhead">' + badge
           + '<strong class="gname-' + (g.mode || 'custom') + '">' + escapeHtml(g.game) + '</strong><span class="histdate">' + fmtDate(g.finishedAt) + '</span>'
-          + '<button class="btn small danger" data-del="' + g.id + '" type="button">' + (deleteArmedId === g.id ? 'Tap again to delete' : 'Delete') + '</button></div>'
+          + action + '</div>'
           + '<div class="histplayers">' + g.players.map(function(n, i){
-              return '<span class="' + (i === g.winnerIdx ? 'winner' : '') + '">' + (i === g.winnerIdx ? '♛ ' : '') + escapeHtml(canonicalName(n)) + ' · ' + g.totals[i] + '</span>';
+              var nm = canonicalName(n);
+              var isW = winnerNames.indexOf(nm) >= 0;
+              return '<span class="' + (isW ? 'winner' : '') + '">' + (isW ? '♛ ' : '') + escapeHtml(nm) + ' · ' + g.totals[i] + '</span>';
             }).join('') + '</div>'
-          + '<div class="histwin">Winner: ' + escapeHtml(canonicalName(g.players[g.winnerIdx])) + '</div>'
+          + '<div class="histwin">Winner' + (winnerNames.length > 1 ? 's' : '') + ': ' + winnerNames.map(function(n){ return escapeHtml(n); }).join(' &amp; ') + '</div>'
           + '</div>';
       });
       html += '</div>';
@@ -2024,6 +2220,25 @@
           LOG.games = LOG.games.filter(function(g){ return g.id !== id; });
           saveLog();
           renderHistory();
+        });
+      });
+      root.querySelectorAll('[data-sdel]').forEach(function(btn){
+        btn.addEventListener('click', function(){
+          var id = btn.getAttribute('data-sdel');
+          if (String(sharedDeleteArmedId) !== id){ sharedDeleteArmedId = id; renderHistory(); return; }
+          sharedDeleteArmedId = null;
+          btn.disabled = true; btn.textContent = 'Removing…';
+          deleteSharedScore(id, function(ok){
+            if (ok){
+              sharedEntries = sharedEntries.filter(function(e){ return String(e.id) !== id; });
+              saveSharedCache();
+              histNote = '';
+              fetchSharedScores();
+            } else {
+              histNote = 'Could not reach the score server to remove that entry — try again in a moment.';
+            }
+            renderHistory();
+          });
         });
       });
     }
@@ -2123,6 +2338,10 @@
       .badge.app{ background:#dcefe2; color:#14532d; }
       .badge.paper{ background:#fdeeda; color:#7a5200; }
       @media (prefers-color-scheme: dark){ .badge.app{ background:#173d26; color:#8fe3ab; } .badge.paper{ background:#3a2f08; color:#ffd968; } }
+      .badge.local{ background:#e5e7eb; color:#374151; }
+      @media (prefers-color-scheme: dark){ .badge.local{ background:#2b3230; color:#c3cdc6; } }
+      .syncnote{ background:var(--panel); border:1px solid var(--panel-line); border-radius:12px; padding:10px 14px; font-size:.9rem; color:var(--page-muted); margin:0 0 12px; }
+      .sc-savestatus{ font-size:.9rem; color:var(--page-muted); min-height:1.2em; margin-top:10px; }
       .histdate{ color:var(--page-muted); font-size:.85rem; }
       .histplayers{ display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:8px; font-size:.95rem; }
       .histplayers .winner{ font-weight:800; }
@@ -5040,27 +5259,10 @@
       if (!sheet || !scrim) return;
       if (!oLogged){
         oLogged = true;
-        try {
-          var players = st.players.map(function(p){ return (typeof canonicalName === 'function' ? canonicalName(p.name) : p.name); });
-          var totals = st.players.map(function(p){ return p.totalScore; });
-          var winnerIdx = 0, wi;
-          if (st.winners && st.winners.length){
-            for (wi=0; wi<st.players.length; wi++) if (st.winners.indexOf(st.players[wi].id) >= 0){ winnerIdx = wi; break; }
-          } else {
-            for (wi=1; wi<totals.length; wi++) if (totals[wi] < totals[winnerIdx]) winnerIdx = wi;
-          }
-          var roundsByPlayer = st.players.map(function(p, pi){
-            var arr = (oRoundScores[pi] || []).slice();
-            while (arr.length < 11) arr.push(0);
-            return arr.slice(0, 11);
-          });
-          LOG.games.push({
-            id: 'g' + Date.now(), source: 'app', game: 'Five Crowns', mode: 'fivecrowns', winDir: 'low',
-            players: players, roundsByPlayer: roundsByPlayer, totals: totals,
-            winnerIdx: winnerIdx, complete: true, finishedAt: Date.now()
-          });
-          saveLog();
-        } catch (e) {}
+        // The server records finished online games in the shared ElMunBut
+        // table itself — logging the game on this device as well would
+        // double-count it, so just refresh the shared table instead.
+        if (typeof fetchSharedScores === 'function') fetchSharedScores();
       }
       if (oSheetKind === 'game') return;
       oSheetKind = 'game';
@@ -5076,7 +5278,7 @@
       var winnerNames = winners.map(function(p){ return p.name; }).join(' & ');
       var order = st.players.map(function(p, i){ return { p:p, i:i }; }).sort(function(a, b){ return a.p.totalScore - b.p.totalScore; });
       var html = '<h2>' + oEsc(winnerNames) + (winners.length > 1 ? ' win the game!' : ' wins the game!') + '</h2>'
-        + '<p class="sub">Final totals after 11 rounds — lowest total wins. This game has been saved to your ElMunBut score log.</p>'
+        + '<p class="sub">Final totals after 11 rounds — lowest total wins. The server has recorded this game on the shared ElMunBut score table.</p>'
         + '<table class="standings"><tr><th>Player</th><th class="num">Total</th></tr>';
       order.forEach(function(o){
         var isWin = winners.indexOf(o.p) >= 0;
@@ -5987,28 +6189,10 @@
       if (!sheet || !scrim) return;
       if (!f7oLogged){
         f7oLogged = true;
-        try {
-          var players = st.players.map(function(p){ return (typeof canonicalName === 'function' ? canonicalName(p.name) : p.name); });
-          var totals = st.players.map(function(p){ return p.totalScore; });
-          var winnerIdx = 0, wi;
-          if (st.winners && st.winners.length){
-            for (wi=0; wi<st.players.length; wi++) if (st.winners.indexOf(st.players[wi].id) >= 0){ winnerIdx = wi; break; }
-          } else {
-            for (wi=1; wi<totals.length; wi++) if (totals[wi] > totals[winnerIdx]) winnerIdx = wi;
-          }
-          var nRounds = st.round || 0;
-          var roundsByPlayer = st.players.map(function(p, pi){
-            var arr = (f7oRoundScores[pi] || []).slice();
-            while (arr.length < nRounds) arr.push(0);
-            return nRounds ? arr.slice(0, nRounds) : arr;
-          });
-          LOG.games.push({
-            id: 'g' + Date.now(), source: 'app', game: 'Flip 7', mode: 'flip7', winDir: 'high',
-            players: players, roundsByPlayer: roundsByPlayer, totals: totals,
-            winnerIdx: winnerIdx, complete: true, finishedAt: Date.now()
-          });
-          saveLog();
-        } catch (e) {}
+        // The server records finished online games in the shared ElMunBut
+        // table itself — logging the game on this device as well would
+        // double-count it, so just refresh the shared table instead.
+        if (typeof fetchSharedScores === 'function') fetchSharedScores();
         if (st.winners && st.winners.indexOf(f7oMyId) >= 0) f7oFanfare('win');
       }
       if (f7oSheetKind === 'f7game') return;
@@ -6026,7 +6210,7 @@
       var order = st.players.map(function(p, i){ return { p:p, i:i }; }).sort(function(a, b){ return b.p.totalScore - a.p.totalScore; });
       var host = f7oIsHost();
       var html = '<h2>' + f7oEsc(winnerNames) + (winners.length > 1 ? ' win the game!' : ' wins the game!') + '</h2>'
-        + '<p class="sub">Final totals — first to 200 wins. This game has been saved to your ElMunBut score log.</p>'
+        + '<p class="sub">Final totals — first to 200 wins. The server has recorded this game on the shared ElMunBut score table.</p>'
         + '<table class="standings"><tr><th>Player</th><th class="num">Total</th></tr>';
       order.forEach(function(o){
         var isWin = winners.indexOf(o.p) >= 0;
