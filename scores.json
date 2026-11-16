@@ -214,28 +214,5 @@
     "winners": [
       "Lori"
     ]
-  },
-  {
-    "id": "smwin73se9y6utt",
-    "ts": 1794795998702,
-    "game": "Flip 7",
-    "source": "online",
-    "players": [
-      {
-        "name": "Matthew",
-        "score": 145
-      },
-      {
-        "name": "Matthew",
-        "score": 101
-      },
-      {
-        "name": "Test",
-        "score": 210
-      }
-    ],
-    "winners": [
-      "Test"
-    ]
   }
 ]
