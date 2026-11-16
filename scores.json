@@ -46,33 +46,6 @@
     ]
   },
   {
-    "id": "smwijfrr95ar6yq",
-    "ts": 1794789684549,
-    "game": "Flip 7",
-    "source": "manual",
-    "players": [
-      {
-        "name": "Matthew",
-        "score": 201
-      },
-      {
-        "name": "Audra",
-        "score": 100
-      },
-      {
-        "name": "The Butler",
-        "score": 95
-      },
-      {
-        "name": "Lori",
-        "score": 171
-      }
-    ],
-    "winners": [
-      "Matthew"
-    ]
-  },
-  {
     "id": "smwijg01y1injau",
     "ts": 1794789695302,
     "game": "Flip 7",
@@ -97,33 +70,6 @@
     ],
     "winners": [
       "Matthew"
-    ]
-  },
-  {
-    "id": "smwijg184rnap88",
-    "ts": 1794789696820,
-    "game": "Flip 7",
-    "source": "manual",
-    "players": [
-      {
-        "name": "Matthew",
-        "score": 148
-      },
-      {
-        "name": "Audra",
-        "score": 105
-      },
-      {
-        "name": "The Butler",
-        "score": 205
-      },
-      {
-        "name": "Lori",
-        "score": 144
-      }
-    ],
-    "winners": [
-      "The Butler"
     ]
   },
   {
