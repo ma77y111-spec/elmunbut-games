@@ -405,5 +405,28 @@
     "winners": [
       "The Butler"
     ]
+  },
+  {
+    "id": "smwkelow1njuu2t",
+    "ts": 1794902495041,
+    "game": "Five Crowns",
+    "source": "manual",
+    "players": [
+      {
+        "name": "The Butler",
+        "score": 200
+      },
+      {
+        "name": "Siena",
+        "score": 103
+      },
+      {
+        "name": "Lori",
+        "score": 32
+      }
+    ],
+    "winners": [
+      "Lori"
+    ]
   }
 ]
